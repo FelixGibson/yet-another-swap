@@ -1,13 +1,11 @@
-use traits::Into;
-
-use orion::numbers::signed_integer::integer_trait::IntegerTrait;
+use yas::numbers::signed_integer::integer_trait::IntegerTrait;
 use integer::{BoundedInt, u256_wide_mul};
 // ====================== INT 256 ======================
 
 // i256 represents a 256-bit integer.
 // The mag field holds the absolute value of the integer.
 // The sign field is true for negative integers, and false for non-negative integers.
-#[derive(Serde, Copy, Drop)]
+#[derive(Serde, Copy, Drop, Hash, starknet::Store)]
 struct i256 {
     mag: u256,
     sign: bool,
@@ -145,6 +143,12 @@ impl i256Neg of Neg<i256> {
     }
 }
 
+impl i256TryIntou256 of TryInto<i256, u256> {
+    fn try_into(self: i256) -> Option<u256> {
+        assert(self.sign == false, 'The sign must be positive');
+        Option::Some(self.mag)
+    }
+}
 
 // Checks if the given i256 integer is zero and has the correct sign.
 // # Arguments
@@ -447,4 +451,27 @@ fn ensure_non_negative_zero(mag: u256, sign: bool) -> i256 {
     } else {
         IntegerTrait::<i256>::new(mag, sign)
     }
+}
+
+fn two_complement_if_nec(x: i256) -> i256 {
+    let mag = if x.sign {
+        ~(x.mag) + 1
+    } else {
+        x.mag
+    };
+
+    i256 { mag: mag, sign: x.sign }
+}
+
+fn bitwise_or(x: i256, y: i256) -> i256 {
+    let x = two_complement_if_nec(x);
+    let y = two_complement_if_nec(y);
+    let sign = x.sign || y.sign;
+    let mag = if sign {
+        ~(x.mag | y.mag) + 1
+    } else {
+        x.mag | y.mag
+    };
+
+    IntegerTrait::<i256>::new(mag, sign)
 }

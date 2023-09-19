@@ -10,7 +10,6 @@ name = "yas"
 
 [dependencies]
 starknet = ">=2.2.0"
-orion = { git = "https://github.com/dpinones/orion" }
 
 [[target.starknet-contract]]
 

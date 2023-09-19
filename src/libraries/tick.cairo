@@ -1,7 +1,4 @@
-use orion::numbers::signed_integer::i32::i32;
-use orion::numbers::signed_integer::i64::i64;
-use orion::numbers::signed_integer::i128::i128;
-use orion::numbers::signed_integer::integer_trait::IntegerTrait;
+use yas::numbers::signed_integer::{i32::i32, i64::i64, i128::i128, integer_trait::IntegerTrait};
 
 #[derive(Copy, Drop, Serde, starknet::Store)]
 struct Info {
@@ -27,10 +24,11 @@ struct Info {
 }
 
 #[starknet::interface]
-trait ITick<TStorage> {
-    fn clear(ref self: TStorage, tick: i32);
+trait ITick<TContractState> {
+    fn tick_spacing_to_max_liquidity_per_tick(self: @TContractState, tick_spacing: i32) -> u128;
+    fn clear(ref self: TContractState, tick: i32);
     fn cross(
-        ref self: TStorage,
+        ref self: TContractState,
         tick: i32,
         fee_growth_global_0X128: u256,
         fee_growth_global_1X128: u256,
@@ -39,35 +37,42 @@ trait ITick<TStorage> {
         time: u32
     ) -> i128;
     fn get_fee_growth_inside(
-        ref self: TStorage,
+        self: @TContractState,
         tick_lower: i32,
         tick_upper: i32,
         tick_current: i32,
         fee_growth_global_0X128: u256,
         fee_growth_global_1X128: u256
     ) -> (u256, u256);
-    // TODO: Function used for testing. To be removed in the future
-    fn set_tick(ref self: TStorage, tick: i32, info: Info);
-    // TODO: Function used for testing. To be removed in the future
-    fn get_tick(self: @TStorage, tick: i32) -> Info;
+    fn update(
+        ref self: TContractState,
+        tick: i32,
+        tick_current: i32,
+        liquidity_delta: i128,
+        fee_growth_global_0X128: u256,
+        fee_growth_global_1X128: u256,
+        seconds_per_liquidity_cumulative_X128: u256,
+        tick_cumulative: i64,
+        time: u32,
+        upper: bool,
+        max_liquidity: u128
+    ) -> bool;
 }
 
 #[starknet::contract]
 mod Tick {
     use super::{ITick, Info};
 
-    use array::ArrayTrait;
-    use option::OptionTrait;
-    use poseidon::poseidon_hash_span;
-    use serde::Serde;
-    use traits::{Into, TryInto};
+    use integer::BoundedInt;
+    use hash::{HashStateTrait, HashStateExTrait};
+    use poseidon::PoseidonTrait;
 
-    use orion::numbers::signed_integer::i32::i32;
-    use orion::numbers::signed_integer::i64::i64;
-    use orion::numbers::signed_integer::i128::i128;
-    use orion::numbers::signed_integer::integer_trait::IntegerTrait;
-
-    use yas::utils::math_utils::MathUtils::mod_subtraction;
+    use yas::libraries::liquidity_math::LiquidityMath;
+    use yas::numbers::signed_integer::{
+        i32::{i32, i32TryIntou128, i32_div_no_round}, i64::i64, i128::i128,
+        integer_trait::IntegerTrait
+    };
+    use yas::utils::math_utils::mod_subtraction;
 
     #[storage]
     struct Storage {
@@ -75,12 +80,30 @@ mod Tick {
     }
 
     #[external(v0)]
-    impl Tick of ITick<ContractState> {
+    impl TickImpl of ITick<ContractState> {
+        /// @notice Derives max liquidity per tick from given tick spacing
+        /// @dev Executed within the pool constructor
+        /// @param tick_spacing The amount of required tick separation, realized in multiples of `tick_spacing`
+        ///     e.g., a tick_spacing of 3 requires ticks to be initialized every 3rd tick i.e., ..., -6, -3, 0, 3, 6, ...
+        /// @return The max liquidity per tick
+        fn tick_spacing_to_max_liquidity_per_tick(self: @ContractState, tick_spacing: i32) -> u128 {
+            let MIN_TICK = IntegerTrait::<i32>::new(887272, true);
+            let MAX_TICK = IntegerTrait::<i32>::new(887272, false);
+
+            let min_tick = i32_div_no_round(MIN_TICK, tick_spacing) * tick_spacing;
+            let max_tick = i32_div_no_round(MAX_TICK, tick_spacing) * tick_spacing;
+            let num_ticks = i32_div_no_round((max_tick - min_tick), tick_spacing)
+                + IntegerTrait::<i32>::new(1, false);
+
+            let max_u128: u128 = BoundedInt::max();
+            max_u128 / num_ticks.try_into().expect('num ticks cannot be negative!')
+        }
+
         /// @notice Clears tick data
         /// @param self The mapping containing all initialized tick information for initialized ticks
         /// @param tick The tick that will be cleared
         fn clear(ref self: ContractState, tick: i32) {
-            let hashed_tick = self._generate_hashed_tick(@tick);
+            let hashed_tick = PoseidonTrait::new().update_with(tick).finalize();
             self
                 .ticks
                 .write(
@@ -116,7 +139,7 @@ mod Tick {
             tick_cumulative: i64,
             time: u32
         ) -> i128 {
-            let hashed_tick = self._generate_hashed_tick(@tick);
+            let hashed_tick = PoseidonTrait::new().update_with(tick).finalize();
             let mut info: Info = self.ticks.read(hashed_tick);
             info.fee_growth_outside_0X128 = fee_growth_global_0X128 - info.fee_growth_outside_0X128;
             info.fee_growth_outside_1X128 = fee_growth_global_1X128 - info.fee_growth_outside_1X128;
@@ -138,15 +161,19 @@ mod Tick {
         /// @return fee_growth_inside_0X128 The all-time fee growth in token0, per unit of liquidity, inside the position's tick boundaries
         /// @return fee_growth_inside_1X128 The all-time fee growth in token1, per unit of liquidity, inside the position's tick boundaries
         fn get_fee_growth_inside(
-            ref self: ContractState,
+            self: @ContractState,
             tick_lower: i32,
             tick_upper: i32,
             tick_current: i32,
             fee_growth_global_0X128: u256,
             fee_growth_global_1X128: u256
         ) -> (u256, u256) {
-            let lower: Info = self.ticks.read(self._generate_hashed_tick(@tick_lower));
-            let upper: Info = self.ticks.read(self._generate_hashed_tick(@tick_upper));
+            let lower: Info = self
+                .ticks
+                .read(PoseidonTrait::new().update_with(tick_lower).finalize());
+            let upper: Info = self
+                .ticks
+                .read(PoseidonTrait::new().update_with(tick_upper).finalize());
 
             // calculate fee growth below
             let (fee_growth_below_0X128, fee_growth_below_1X128) = if tick_current >= tick_lower {
@@ -181,23 +208,82 @@ mod Tick {
             )
         }
 
-        fn set_tick(ref self: ContractState, tick: i32, info: Info) {
-            let hashed_tick = self._generate_hashed_tick(@tick);
-            self.ticks.write(hashed_tick, info);
-        }
+        /// @notice Updates a tick and returns true if the tick was flipped from initialized to uninitialized, or vice versa
+        /// @param self The mapping containing all tick information for initialized ticks
+        /// @param tick The tick that will be updated
+        /// @param tick_current The current tick
+        /// @param liquidity_delta A new amount of liquidity to be added (subtracted) when tick is crossed from left to right (right to left)
+        /// @param fee_growth_global_0X128 The all-time global fee growth, per unit of liquidity, in token0
+        /// @param fee_growth_global_1X128 The all-time global fee growth, per unit of liquidity, in token1
+        /// @param seconds_per_liquidity_cumulative_X128 The all-time seconds per max(1, liquidity) of the pool
+        /// @param tick_cumulative The tick * time elapsed since the pool was first initialized
+        /// @param time The current block timestamp cast to a uint32
+        /// @param upper true for updating a position's upper tick, or false for updating a position's lower tick
+        /// @param max_liquidity The maximum liquidity allocation for a single tick
+        /// @return flipped Whether the tick was flipped from initialized to uninitialized, or vice versa
+        fn update(
+            ref self: ContractState,
+            tick: i32,
+            tick_current: i32,
+            liquidity_delta: i128,
+            fee_growth_global_0X128: u256,
+            fee_growth_global_1X128: u256,
+            seconds_per_liquidity_cumulative_X128: u256,
+            tick_cumulative: i64,
+            time: u32,
+            upper: bool,
+            max_liquidity: u128
+        ) -> bool {
+            let hashed_tick = PoseidonTrait::new().update_with(tick).finalize();
+            let mut info: Info = self.ticks.read(hashed_tick);
 
-        fn get_tick(self: @ContractState, tick: i32) -> Info {
-            let hashed_tick = self._generate_hashed_tick(@tick);
-            self.ticks.read(hashed_tick)
+            let liquidity_gross_before: u128 = info.liquidity_gross;
+            let liquidity_gross_after: u128 = LiquidityMath::add_delta(
+                liquidity_gross_before, liquidity_delta
+            );
+
+            assert(liquidity_gross_after <= max_liquidity, 'LO');
+
+            let flipped = (liquidity_gross_after == 0) != (liquidity_gross_before == 0);
+
+            if (liquidity_gross_before == 0) {
+                // by convention, we assume that all growth before a tick was initialized happened _below_ the tick
+                if (tick <= tick_current) {
+                    info.fee_growth_outside_0X128 = fee_growth_global_0X128;
+                    info.fee_growth_outside_1X128 = fee_growth_global_1X128;
+                    info.seconds_per_liquidity_outside_X128 = seconds_per_liquidity_cumulative_X128;
+                    info.tick_cumulative_outside = tick_cumulative;
+                    info.seconds_outside = time;
+                }
+                info.initialized = true;
+            }
+
+            info.liquidity_gross = liquidity_gross_after;
+
+            // when the lower (upper) tick is crossed left to right (right to left), liquidity must be added (removed)
+            info
+                .liquidity_net =
+                    if upper {
+                        info.liquidity_net - liquidity_delta
+                    } else {
+                        info.liquidity_net + liquidity_delta
+                    };
+
+            self.ticks.write(hashed_tick, info);
+            flipped
         }
     }
 
     #[generate_trait]
-    impl InternalFunctions of InternalFunctionsTrait {
-        fn _generate_hashed_tick(self: @ContractState, tick: @i32) -> felt252 {
-            let mut serialized: Array<felt252> = ArrayTrait::new();
-            Serde::<i32>::serialize(tick, ref serialized);
-            poseidon_hash_span(serialized.span())
+    impl InternalImpl of InternalTrait {
+        fn set_tick(ref self: ContractState, tick: i32, info: Info) {
+            let hashed_tick = PoseidonTrait::new().update_with(tick).finalize();
+            self.ticks.write(hashed_tick, info);
+        }
+
+        fn get_tick(self: @ContractState, tick: i32) -> Info {
+            let hashed_tick = PoseidonTrait::new().update_with(tick).finalize();
+            self.ticks.read(hashed_tick)
         }
     }
 }

@@ -14,7 +14,7 @@ At YAS we believe product quality should always be a priority so we are commited
 
 This project will be built in the open, ***it's still in development***. We love the Starknet developer ecosystem and we know that a lot of smart and hungry developers would like to collaborate in the future of Starknet. If that's your case you are more than welcome to join us!
 
-***Follow us on [Twitter](https://twitter.com/yas_starknet)***
+***Follow us on [Twitter](https://twitter.com/yetanotherswap)***
 
 ## Important Disclaimer
  Currently, **the project is in a development stage, it has not been audited yet and is not ready for production**. We are also using our [fork](https://github.com/dpinones/orion) of [Orion](https://github.com/gizatechxyz/orion/tree/main/src/numbers/signed_integer) `signed integer` implementation until all features are implemented and supported in the latest version of Cairo. 
@@ -140,3 +140,8 @@ On Starknet, the deployment process is in two steps:
 - [Liquidity Math in Uniswap V3](https://atiselsts.github.io/pdfs/uniswap-v3-liquidity-math.pdf)
 - [UNISWAP V3 - New Era Of AMMs? Architecture Explained](https://www.youtube.com/watch?v=Ehm-OYBmlPM)
 - [ZK Podcast: Exploring Uniswap V3 and a Multi-L2 Future with Noah and Moody](https://zeroknowledge.fm/185-2/)
+
+## License
+ This project is licensed under the Apache 2.0 license.
+ See [LICENSE](./LICENSE) for more information.
+
