@@ -12,4 +12,7 @@ name = "yas"
 starknet = ">=2.2.0"
 
 [[target.starknet-contract]]
+sierra = true
 
+[cairo]
+sierra-replace-ids = true

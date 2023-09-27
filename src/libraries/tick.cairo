@@ -17,10 +17,25 @@ struct Info {
     seconds_per_liquidity_outside_X128: u256,
     // the seconds spent on the other side of the tick (relative to the current tick)
     // only has relative meaning, not absolute — the value depends on when the tick is initialized
-    seconds_outside: u32,
+    seconds_outside: u64,
     // true if the tick is initialized, i.e. the value is exactly equivalent to the expression liquidityGross != 0
     // these 8 bits are set to prevent fresh sstores when crossing newly initialized ticks
     initialized: bool
+}
+
+impl DefaultInfo of Default<Info> {
+    fn default() -> Info {
+        Info {
+            liquidity_gross: 0,
+            liquidity_net: IntegerTrait::<i128>::new(0, false),
+            fee_growth_outside_0X128: 0,
+            fee_growth_outside_1X128: 0,
+            tick_cumulative_outside: IntegerTrait::<i64>::new(0, false),
+            seconds_per_liquidity_outside_X128: 0,
+            seconds_outside: 0,
+            initialized: false
+        }
+    }
 }
 
 #[starknet::interface]
@@ -34,7 +49,7 @@ trait ITick<TContractState> {
         fee_growth_global_1X128: u256,
         seconds_per_liquidity_cumulative_X128: u256,
         tick_cumulative: i64,
-        time: u32
+        time: u64
     ) -> i128;
     fn get_fee_growth_inside(
         self: @TContractState,
@@ -51,9 +66,7 @@ trait ITick<TContractState> {
         liquidity_delta: i128,
         fee_growth_global_0X128: u256,
         fee_growth_global_1X128: u256,
-        seconds_per_liquidity_cumulative_X128: u256,
-        tick_cumulative: i64,
-        time: u32,
+        time: u64,
         upper: bool,
         max_liquidity: u128
     ) -> bool;
@@ -104,30 +117,17 @@ mod Tick {
         /// @param tick The tick that will be cleared
         fn clear(ref self: ContractState, tick: i32) {
             let hashed_tick = PoseidonTrait::new().update_with(tick).finalize();
-            self
-                .ticks
-                .write(
-                    hashed_tick,
-                    Info {
-                        liquidity_gross: 0,
-                        liquidity_net: IntegerTrait::<i128>::new(0, false),
-                        fee_growth_outside_0X128: 0,
-                        fee_growth_outside_1X128: 0,
-                        tick_cumulative_outside: IntegerTrait::<i64>::new(0, false),
-                        seconds_per_liquidity_outside_X128: 0,
-                        seconds_outside: 0,
-                        initialized: false
-                    }
-                );
+            self.ticks.write(hashed_tick, Default::default());
         }
 
         /// @notice Transitions to next tick as needed by price movement
+        /// The parameters seconds_per_liquidity_cumulative_X128 and tick_cumulative 
+        /// were removed because the module related to the Oracle is not yet implemented
+        ///
         /// @param self The mapping containing all tick information for initialized ticks
         /// @param tick The destination tick of the transition
         /// @param fee_growth_global_0X128 The all-time global fee growth, per unit of liquidity, in token0
         /// @param fee_growth_global_1X128 The all-time global fee growth, per unit of liquidity, in token1
-        /// @param seconds_per_liquidity_cumulative_X128 The current seconds per liquidity
-        /// @param tick_cumulative The tick * time elapsed since the pool was first initialized
         /// @param time The current block.timestamp
         /// @return liquidity_net The amount of liquidity added (subtracted) when tick is crossed from left to right (right to left)
         fn cross(
@@ -137,7 +137,7 @@ mod Tick {
             fee_growth_global_1X128: u256,
             seconds_per_liquidity_cumulative_X128: u256,
             tick_cumulative: i64,
-            time: u32
+            time: u64
         ) -> i128 {
             let hashed_tick = PoseidonTrait::new().update_with(tick).finalize();
             let mut info: Info = self.ticks.read(hashed_tick);
@@ -228,9 +228,7 @@ mod Tick {
             liquidity_delta: i128,
             fee_growth_global_0X128: u256,
             fee_growth_global_1X128: u256,
-            seconds_per_liquidity_cumulative_X128: u256,
-            tick_cumulative: i64,
-            time: u32,
+            time: u64,
             upper: bool,
             max_liquidity: u128
         ) -> bool {
@@ -241,7 +239,6 @@ mod Tick {
             let liquidity_gross_after: u128 = LiquidityMath::add_delta(
                 liquidity_gross_before, liquidity_delta
             );
-
             assert(liquidity_gross_after <= max_liquidity, 'LO');
 
             let flipped = (liquidity_gross_after == 0) != (liquidity_gross_before == 0);
@@ -251,8 +248,6 @@ mod Tick {
                 if (tick <= tick_current) {
                     info.fee_growth_outside_0X128 = fee_growth_global_0X128;
                     info.fee_growth_outside_1X128 = fee_growth_global_1X128;
-                    info.seconds_per_liquidity_outside_X128 = seconds_per_liquidity_cumulative_X128;
-                    info.tick_cumulative_outside = tick_cumulative;
                     info.seconds_outside = time;
                 }
                 info.initialized = true;
@@ -279,6 +274,18 @@ mod Tick {
         fn set_tick(ref self: ContractState, tick: i32, info: Info) {
             let hashed_tick = PoseidonTrait::new().update_with(tick).finalize();
             self.ticks.write(hashed_tick, info);
+        }
+
+        fn set_ticks(ref self: ContractState, ticks: Array<i32>, ticks_info: Array<Info>) {
+            assert(ticks.len() == ticks_info.len(), 'ticks & info must have same len');
+            let mut i = 0;
+            loop {
+                if i > ticks.len() - 1 {
+                    break;
+                }
+                InternalImpl::set_tick(ref self, *(ticks.at(i)), *(ticks_info.at(i)));
+                i += 1;
+            };
         }
 
         fn get_tick(self: @ContractState, tick: i32) -> Info {
